@@ -1,0 +1,13 @@
+# Generated simulation output
+output/
+
+# Python environment and caches
+.venv/
+__pycache__/
+*.pyc
+
+# Compiled executables
+/simulation
+/simulation_release
+/omp_test
+/tests/unit_tests
