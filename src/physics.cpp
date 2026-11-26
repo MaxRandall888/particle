@@ -110,3 +110,22 @@ void integrateEuler(std::vector<Particle>& particles, double timestep) {
         particle.vz += particle.az * timestep;
     }
 }
+
+void leapfrogKickDrift(std::vector<Particle>& particles, double timestep) {
+    for (Particle& particle : particles) {
+        particle.vx += particle.ax * (0.5 * timestep);
+        particle.vy += particle.ay * (0.5 * timestep);
+        particle.vz += particle.az * (0.5 * timestep);
+        particle.x += particle.vx * timestep;
+        particle.y += particle.vy * timestep;
+        particle.z += particle.vz * timestep;
+    }
+}
+
+void leapfrogFinishKick(std::vector<Particle>& particles, double timestep) {
+    for (Particle& particle : particles) {
+        particle.vx += particle.ax * (0.5 * timestep);
+        particle.vy += particle.ay * (0.5 * timestep);
+        particle.vz += particle.az * (0.5 * timestep);
+    }
+}

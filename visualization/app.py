@@ -91,6 +91,7 @@ def simulation_arguments(configuration):
              ("snapshot_interval", "--snapshot-interval")) for argument in (flag, str(values[key]))]
     if values.get("frames") is not None:
         arguments += ["--frames", str(values["frames"])]
+    arguments += ["--integrator", values.get("integrator", "euler")]
     return arguments
 
 
@@ -153,6 +154,7 @@ class SimulationApp(QtWidgets.QMainWindow):
         self.preparing_signature = None
         self.preview_view = None
         self.run_view = None
+        self.run_view_path = None
         self.vector_item = None
         self.current_run = None
         self.log_file = None
@@ -402,7 +404,7 @@ class SimulationApp(QtWidgets.QMainWindow):
                  self.simulation_fields["softening"], self.executable, choose]
         for previous, following in zip(order, order[1:]):
             QtWidgets.QWidget.setTabOrder(previous, following)
-        simulation_layout.addWidget(QtWidgets.QLabel("Explicit Euler · G = 1 · open boundaries"))
+        simulation_layout.addWidget(QtWidgets.QLabel("Fixed timestep · G = 1 · open boundaries"))
         simulation_layout.addStretch()
         for contents, label in ((object_page, "Structure"), (motion_page, "Motion"), (simulation_page, "Run settings")):
             scroll = QtWidgets.QScrollArea()
@@ -440,6 +442,11 @@ class SimulationApp(QtWidgets.QMainWindow):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         form = QtWidgets.QFormLayout()
+        self.integrator = QtWidgets.QComboBox()
+        self.integrator.addItem("Explicit Euler", "euler")
+        self.integrator.addItem("Leapfrog", "leapfrog")
+        self.field_row(form, "Integrator", self.integrator,
+            "Time integration method. Leapfrog uses second-order kick–drift–kick updates. Both use the selected fixed timestep; changing this preserves the prepared initial conditions.")
         self.output_root = QtWidgets.QLineEdit(str(ROOT / "output"))
         self.run_name = QtWidgets.QLineEdit(self.new_run_name())
         form.addRow("Run directory name", self.run_name)
@@ -485,6 +492,8 @@ class SimulationApp(QtWidgets.QMainWindow):
         row = QtWidgets.QVBoxLayout()
         self.open_run_button = self.button(row, "Open selected run", self.open_run)
         self.use_setup_button = self.button(row, "Use its setup", self.use_setup)
+        self.delete_run_button = self.button(row, "Delete selected run…", self.delete_run)
+        self.delete_run_button.setToolTip("Permanently delete the selected run directory, including its snapshots, setup and logs")
         self.run_summary = QtWidgets.QLabel("Select a saved run.")
         self.run_summary.setWordWrap(True)
         row.addWidget(self.run_summary)
@@ -497,6 +506,7 @@ class SimulationApp(QtWidgets.QMainWindow):
 
     def configuration(self):
         simulation = {key: widget.value() for key, widget in self.simulation_fields.items()}
+        simulation["integrator"] = self.integrator.currentData()
         if self.output_mode.currentData() == "frames":
             simulation["frames"] = self.frame_count.value()
         return {"version": 1, "objects": copy.deepcopy(self.objects), "simulation": simulation}
@@ -625,6 +635,7 @@ class SimulationApp(QtWidgets.QMainWindow):
             path = self.selected_run()
             self.open_run_button.setEnabled(not busy and path is not None and self.run_is_complete(path))
             self.use_setup_button.setEnabled(not busy and path is not None and (path / "configuration.json").exists())
+            self.delete_run_button.setEnabled(not busy and path is not None)
 
     def executable_path(self):
         path = Path(self.executable.text()).expanduser().resolve()
@@ -819,6 +830,7 @@ class SimulationApp(QtWidgets.QMainWindow):
                 self.sections.setCurrentIndex(0)
             else:
                 self.run_view = widget
+                self.run_view_path = self.loading_path.resolve()
                 self.sections.setCurrentIndex(2)
             previous = self.display.currentWidget()
             if previous is not self.preview_placeholder and previous.playback.playing:
@@ -844,6 +856,7 @@ class SimulationApp(QtWidgets.QMainWindow):
             widget.deleteLater()
             setattr(self, attribute, None)
         if kind == "preview": self.vector_item = None
+        else: self.run_view_path = None
 
     def toggle_vectors(self, checked):
         if self.vector_item is not None: self.vector_item.setVisible(checked)
@@ -919,7 +932,41 @@ class SimulationApp(QtWidgets.QMainWindow):
                 metadata = read_json(file) if file.exists() else {}
                 self.run_summary.setText(f"{metadata.get('step_count', '—')} steps · dt {metadata.get('timestep', '—')} · {metadata.get('thread_count', '—')} threads")
             except (OSError, ValueError): self.run_summary.setText("Could not read metadata")
+        else:
+            self.run_summary.setText("Select a saved run.")
         self.update_buttons()
+
+    def delete_run(self):
+        if self.process is not None or self.loading_future is not None: return
+        path = self.selected_run()
+        if path is None: return
+        try:
+            root = Path(self.runs_root.text()).expanduser().resolve()
+            entry = root / self.run_table.item(self.run_table.currentRow(), 0).text()
+            if entry.is_symlink() or entry.resolve() != path or path.parent != root:
+                raise ValueError("Only run directories directly inside the selected runs folder can be deleted. Symbolic links cannot be deleted here.")
+            if not path.is_dir():
+                raise FileNotFoundError(f"The run directory no longer exists: {path}")
+            dialog = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Icon.Warning,
+                "Delete saved run", f"Permanently delete this run?\n\n{path}\n\n"
+                "All files in this directory, including snapshots, setup and logs, will be deleted. This cannot be undone.",
+                QtWidgets.QMessageBox.StandardButton.NoButton, self)
+            delete_button = dialog.addButton("Delete run", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+            cancel_button = dialog.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+            dialog.setDefaultButton(cancel_button)
+            dialog.setEscapeButton(cancel_button)
+            dialog.exec()
+            if dialog.clickedButton() is not delete_button: return
+            # Check again after the modal dialog in case the directory changed.
+            if entry.is_symlink() or entry.resolve() != path or not path.is_dir():
+                raise ValueError("The run directory changed while confirming deletion. Refresh the list and try again.")
+            if self.run_view_path == path:
+                self.close_view("run")
+            shutil.rmtree(path)
+            self.statusBar().showMessage(f"Deleted run: {path.name}", 10000)
+        except (OSError, ValueError) as error:
+            self.show_error(f"Could not delete the run:\n{error}")
+        self.refresh_runs()
 
     def open_run(self):
         path = self.selected_run()
@@ -940,6 +987,9 @@ class SimulationApp(QtWidgets.QMainWindow):
             self.objects = config["objects"]
             for obj in self.objects: self.object_list.addItem(obj["name"])
             for key, widget in self.simulation_fields.items(): widget.setValue(config["simulation"][key])
+            integrator_index = self.integrator.findData(config["simulation"].get("integrator", "euler"))
+            if integrator_index < 0: raise ValueError("Unsupported saved integrator")
+            self.integrator.setCurrentIndex(integrator_index)
             frames = config["simulation"].get("frames")
             self.output_mode.setCurrentIndex(0 if frames is not None else 1)
             self.update_output_controls()

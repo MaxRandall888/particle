@@ -19,3 +19,8 @@ void calculateAccelerations(std::vector<Particle>& particles,
                             double theta, double softeningLength, int threadCount);
 
 void integrateEuler(std::vector<Particle>& particles, double timestep);
+
+// Requires acceleration at the current positions; leaves velocities at half-step.
+void leapfrogKickDrift(std::vector<Particle>& particles, double timestep);
+// Requires acceleration recalculated at the drifted positions.
+void leapfrogFinishKick(std::vector<Particle>& particles, double timestep);

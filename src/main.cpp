@@ -39,6 +39,7 @@ struct SimulationParameters {
     std::size_t particleCount = 1000;
     int stepCount = 2000;
     double timestep = 0.001;
+    std::string integrator = "euler";
     double theta = 0.5;
     double softeningLength = 0.02;
     int threadCount = 16;
@@ -565,7 +566,7 @@ void writeMetadata(const SimulationParameters& parameters, const std::vector<int
          << "  \"requested_frames\": " << parameters.frameCount << ",\n"
          << "  \"max_tree_depth\": " << parameters.maxDepth << ",\n"
          << "  \"seed\": " << parameters.seed << ",\n"
-         << "  \"integrator\": \"explicit_euler\",\n"
+         << "  \"integrator\": \"" << (parameters.integrator == "euler" ? "explicit_euler" : "leapfrog") << "\",\n"
          << "  \"softening_model\": \"plummer\",\n";
     if (!parameters.objects.empty() || !parameters.initialStateFile.empty()) {
         file << "  \"initial_conditions\": {\"distribution\": \"scene\", \"prepared_state_loaded\": "
@@ -637,7 +638,7 @@ int main(int argc, char* argv[]) {
     SimulationParameters parameters = defaults;
     try {
         enum {
-            SnapshotInterval = 1000, Timestep, OpeningAngle, Softening, Seed, Scene, PrepareOnly, InitialState, Frames
+            SnapshotInterval = 1000, Timestep, OpeningAngle, Softening, Seed, Scene, PrepareOnly, InitialState, Frames, Integrator
         };
         const option options[]{
             {"threads", required_argument, nullptr, 't'},
@@ -645,6 +646,7 @@ int main(int argc, char* argv[]) {
             {"snapshot-interval", required_argument, nullptr, SnapshotInterval},
             {"frames", required_argument, nullptr, Frames},
             {"dt", required_argument, nullptr, Timestep},
+            {"integrator", required_argument, nullptr, Integrator},
             {"theta", required_argument, nullptr, OpeningAngle},
             {"softening", required_argument, nullptr, Softening},
             {"seed", required_argument, nullptr, Seed},
@@ -674,6 +676,12 @@ int main(int argc, char* argv[]) {
                 break;
             case Timestep:
                 parseNumber(optarg, parameters.timestep, "--dt");
+                break;
+            case Integrator:
+                parameters.integrator = optarg;
+                if (parameters.integrator != "euler" && parameters.integrator != "leapfrog") {
+                    throw std::invalid_argument("--integrator must be euler or leapfrog");
+                }
                 break;
             case OpeningAngle:
                 parseNumber(optarg, parameters.theta, "--theta");
@@ -710,6 +718,7 @@ int main(int argc, char* argv[]) {
                           << "                         overrides interval; 2 <= N <= steps+1 (1 when steps=0)\n"
                           << "  --dt VALUE             Positive timestep in simulation units (default: "
                           << defaults.timestep << ")\n"
+                          << "  --integrator METHOD    euler or leapfrog; fixed timestep (default: euler)\n"
                           << "  --theta VALUE          Nonnegative opening angle; 0 disables approximation (default: "
                           << defaults.theta << ")\n"
                           << "  --softening VALUE      Positive Plummer softening length (default: "
@@ -833,8 +842,7 @@ int main(int argc, char* argv[]) {
                                            intervals / 2) / intervals;
             return static_cast<std::uint64_t>(step) == target;
         };
-        const int progressInterval = std::max(1, parameters.stepCount / 100);
-        for (int step = 1; step <= parameters.stepCount; ++step) {
+        auto updateAccelerations = [&]() {
             auto start = Clock::now();
             buildOctree(particles, nodes, nextParticle, parameters.maxDepth);
             treeSeconds += secondsSince(start);
@@ -847,10 +855,24 @@ int main(int argc, char* argv[]) {
             calculateAccelerations(particles, nodes, nextParticle,
                                    parameters.theta, parameters.softeningLength, parameters.threadCount);
             forceSeconds += secondsSince(start);
+        };
+        const bool leapfrog = parameters.integrator == "leapfrog";
+        // A prepared state does not contain accelerations. Always calculate the
+        // initial force before the first half-kick, including loaded states.
+        if (leapfrog && parameters.stepCount > 0) updateAccelerations();
+        const int progressInterval = std::max(1, parameters.stepCount / 100);
+        for (int step = 1; step <= parameters.stepCount; ++step) {
+            if (leapfrog) {
+                const auto start = Clock::now();
+                leapfrogKickDrift(particles, parameters.timestep);
+                integrationSeconds += secondsSince(start);
+            }
+            updateAccelerations();
 
             // The OpenMP force loop has completed before any positions change.
-            start = Clock::now();
-            integrateEuler(particles, parameters.timestep);
+            const auto start = Clock::now();
+            if (leapfrog) leapfrogFinishKick(particles, parameters.timestep);
+            else integrateEuler(particles, parameters.timestep);
             integrationSeconds += secondsSince(start);
 
             if (snapshotDue(step)) {
